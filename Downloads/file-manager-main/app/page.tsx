@@ -16,6 +16,14 @@ interface Folder {
   name: string;
 }
 
+interface UploadItem {
+  file: File;
+  progress: number;
+  speed: string;
+  status: 'queued' | 'uploading' | 'done' | 'error';
+  error?: string;
+}
+
 function formatBytes(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
@@ -35,7 +43,7 @@ function getFileIcon(filename: string) {
     return <div className="w-10 h-10 rounded-lg bg-orange-100 flex items-center justify-center text-orange-600 font-bold text-xs">VID</div>;
   if (['mp3', 'wav', 'ogg', 'aac', 'm4a'].includes(ext))
     return <div className="w-10 h-10 rounded-lg bg-purple-100 flex items-center justify-center text-purple-600 font-bold text-xs">AUD</div>;
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext))
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic'].includes(ext))
     return <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">IMG</div>;
   if (ext === 'pdf')
     return <div className="w-10 h-10 rounded-lg bg-red-100 flex items-center justify-center text-red-600 font-bold text-xs">PDF</div>;
@@ -49,11 +57,11 @@ function getFileIcon(filename: string) {
 function getFileBadge(filename: string) {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
   if (['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext))
-    return <span className="px-3 py-1 rounded-full bg-blue-100 text-blue-600 text-xs font-medium">Video</span>;
+    return <span className="px-3 py-1 rounded-full bg-orange-100 text-orange-600 text-xs font-medium">Video</span>;
   if (['mp3', 'wav', 'ogg', 'aac', 'm4a'].includes(ext))
     return <span className="px-3 py-1 rounded-full bg-purple-100 text-purple-600 text-xs font-medium">Audio</span>;
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext))
-    return <span className="px-3 py-1 rounded-full bg-green-100 text-green-600 text-xs font-medium">Image</span>;
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic'].includes(ext))
+    return <span className="px-3 py-1 rounded-full bg-blue-100 text-blue-600 text-xs font-medium">Image</span>;
   if (ext === 'pdf')
     return <span className="px-3 py-1 rounded-full bg-red-100 text-red-600 text-xs font-medium">PDF</span>;
   if (['xlsx', 'xls', 'csv'].includes(ext))
@@ -68,11 +76,7 @@ function isLargeFile(size: number) {
 }
 
 export default function FileManager() {
-  const [file, setFile] = useState<File | null>(null);
-  const [progress, setProgress] = useState(0);
-  const [speed, setSpeed] = useState('');
-  const [status, setStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>('idle');
-  const [errorMsg, setErrorMsg] = useState('');
+  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [files, setFiles] = useState<S3File[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -82,8 +86,8 @@ export default function FileManager() {
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const startRef = useRef<number>(0);
 
   const totalSize = files.reduce((sum, f) => sum + f.size, 0);
 
@@ -109,24 +113,31 @@ export default function FileManager() {
   const navigateToFolder = (folderName: string) => {
     setCurrentFolder(folderName);
     fetchFiles(folderName);
-    reset();
+    setUploadItems([]);
   };
 
-  const handleFile = (f: File) => {
-    setFile(f);
-    setProgress(0);
-    setStatus('idle');
-    setErrorMsg('');
+  const handleFiles = (newFiles: FileList) => {
+    const items: UploadItem[] = Array.from(newFiles).map(file => ({
+      file,
+      progress: 0,
+      speed: '',
+      status: 'queued'
+    }));
+    setUploadItems(items);
   };
 
   const handleDrop = (e: DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const f = e.dataTransfer.files[0];
-    if (f) handleFile(f);
+    if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
   };
 
-  const uploadRegular = async (file: File) => {
+  const updateItem = (index: number, updates: Partial<UploadItem>) => {
+    setUploadItems(prev => prev.map((item, i) => i === index ? { ...item, ...updates } : item));
+  };
+
+  const uploadRegular = async (file: File, index: number) => {
+    const startTime = Date.now();
     const res = await fetch(`${API_BASE}/get-upload-url`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -144,9 +155,12 @@ export default function FileManager() {
       xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
       xhr.upload.onprogress = (e) => {
         if (!e.lengthComputable) return;
-        setProgress(Math.round((e.loaded / e.total) * 100));
-        const elapsed = (Date.now() - startRef.current) / 1000;
-        setSpeed(formatBytes(e.loaded / elapsed) + '/s');
+        const pct = Math.round((e.loaded / e.total) * 100);
+        const elapsed = (Date.now() - startTime) / 1000;
+        updateItem(index, {
+          progress: pct,
+          speed: formatBytes(e.loaded / elapsed) + '/s'
+        });
       };
       xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(`S3 error ${xhr.status}`));
       xhr.onerror = () => reject(new Error('Network error'));
@@ -154,7 +168,8 @@ export default function FileManager() {
     });
   };
 
-  const uploadMultipart = async (file: File) => {
+  const uploadMultipart = async (file: File, index: number) => {
+    const startTime = Date.now();
     const createRes = await fetch(`${API_BASE}/create-multipart`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -186,9 +201,11 @@ export default function FileManager() {
         xhr.upload.onprogress = (e) => {
           if (!e.lengthComputable) return;
           const totalUploaded = uploadedBytes + e.loaded;
-          setProgress(Math.round((totalUploaded / file.size) * 100));
-          const elapsed = (Date.now() - startRef.current) / 1000;
-          setSpeed(formatBytes(totalUploaded / elapsed) + '/s');
+          const elapsed = (Date.now() - startTime) / 1000;
+          updateItem(index, {
+            progress: Math.round((totalUploaded / file.size) * 100),
+            speed: formatBytes(totalUploaded / elapsed) + '/s'
+          });
         };
         xhr.onload = () => {
           if (xhr.status < 300) { uploadedBytes += chunk.size; resolve(xhr.getResponseHeader('ETag') || ''); }
@@ -208,19 +225,28 @@ export default function FileManager() {
   };
 
   const startUpload = async () => {
-    if (!file) return;
-    try {
-      startRef.current = Date.now();
-      setStatus('uploading');
-      if (isLargeFile(file.size)) await uploadMultipart(file);
-      else await uploadRegular(file);
-      setStatus('done');
-      setProgress(100);
-      fetchFiles(currentFolder);
-    } catch (err: unknown) {
-      setStatus('error');
-      setErrorMsg(err instanceof Error ? err.message : 'Unknown error');
-    }
+    if (!uploadItems.length) return;
+    setIsUploading(true);
+
+    await Promise.all(uploadItems.map(async (item, index) => {
+      try {
+        updateItem(index, { status: 'uploading' });
+        if (isLargeFile(item.file.size)) {
+          await uploadMultipart(item.file, index);
+        } else {
+          await uploadRegular(item.file, index);
+        }
+        updateItem(index, { status: 'done', progress: 100 });
+      } catch (err) {
+        updateItem(index, {
+          status: 'error',
+          error: err instanceof Error ? err.message : 'Unknown error'
+        });
+      }
+    }));
+
+    setIsUploading(false);
+    fetchFiles(currentFolder);
   };
 
   const handleDownload = async (key: string) => {
@@ -257,13 +283,7 @@ export default function FileManager() {
     }
   };
 
-  const reset = () => {
-    setFile(null);
-    setProgress(0);
-    setStatus('idle');
-    setErrorMsg('');
-    if (inputRef.current) inputRef.current.value = '';
-  };
+  const allDone = uploadItems.length > 0 && uploadItems.every(i => i.status === 'done' || i.status === 'error');
 
   return (
     <main className="min-h-screen bg-gray-50 flex">
@@ -271,7 +291,6 @@ export default function FileManager() {
       {/* Sidebar */}
       <div className="w-56 bg-white border-r border-gray-100 p-5 flex flex-col gap-1 min-h-screen fixed top-0 left-0">
         <p className="text-xs text-gray-400 uppercase tracking-widest font-semibold px-2 mb-3">Folders</p>
-
         <button
           onClick={() => navigateToFolder('')}
           className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-left w-full transition-colors
@@ -282,7 +301,6 @@ export default function FileManager() {
           </svg>
           All files
         </button>
-
         {folders.map(f => (
           <button
             key={f.key}
@@ -296,7 +314,6 @@ export default function FileManager() {
             {f.name}
           </button>
         ))}
-
         <div className="mt-auto">
           <button
             onClick={() => setShowNewFolder(true)}
@@ -390,58 +407,74 @@ export default function FileManager() {
             <input
               ref={inputRef}
               type="file"
+              multiple
               className="hidden"
               onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                const f = e.target.files?.[0];
-                if (f) handleFile(f);
+                if (e.target.files?.length) handleFiles(e.target.files);
               }}
             />
             <svg className="w-8 h-8 mx-auto mb-3 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
             </svg>
             <p className="text-base font-semibold text-gray-800">Drop files here to upload</p>
-            <p className="text-sm text-gray-400 mt-1">Files upload into the current folder</p>
+            <p className="text-sm text-gray-400 mt-1">Select multiple files at once · Uploading into: <span className="font-medium">{currentFolder || 'root'}</span></p>
           </div>
 
-          {/* Selected file */}
-          {file && (
-            <div className="bg-white border border-gray-200 rounded-2xl p-5">
-              <div className="flex items-center gap-3 mb-3">
-                {getFileIcon(file.name)}
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-gray-800 truncate">{file.name}</p>
-                  <p className="text-xs text-gray-400">{formatBytes(file.size)}</p>
+          {/* Upload queue */}
+          {uploadItems.length > 0 && (
+            <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
+              <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+                <p className="text-sm font-semibold text-gray-800">
+                  {uploadItems.length} file{uploadItems.length > 1 ? 's' : ''} selected
+                </p>
+                <div className="flex gap-2">
+                  {allDone ? (
+                    <button
+                      onClick={() => setUploadItems([])}
+                      className="px-4 py-1.5 text-sm border border-gray-200 text-gray-600 rounded-xl hover:bg-gray-50"
+                    >
+                      Clear
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startUpload}
+                      disabled={isUploading}
+                      className="px-4 py-1.5 text-sm bg-gray-900 text-white rounded-xl hover:bg-gray-700 disabled:opacity-40 transition-colors"
+                    >
+                      {isUploading ? 'Uploading…' : `Upload ${uploadItems.length} file${uploadItems.length > 1 ? 's' : ''}`}
+                    </button>
+                  )}
                 </div>
-                {status === 'idle' && (
-                  <button onClick={reset} className="text-gray-300 hover:text-gray-500 text-xl leading-none">✕</button>
-                )}
               </div>
-              {(status === 'uploading' || status === 'done') && (
-                <div className="mb-3">
-                  <div className="w-full bg-gray-100 rounded-full h-1.5 mb-1.5">
-                    <div className="bg-blue-500 h-1.5 rounded-full transition-all duration-200" style={{ width: `${progress}%` }} />
+              <div className="divide-y divide-gray-50">
+                {uploadItems.map((item, index) => (
+                  <div key={index} className="flex items-center gap-4 px-5 py-3">
+                    {getFileIcon(item.file.name)}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-800 truncate">{item.file.name}</p>
+                      <p className="text-xs text-gray-400">{formatBytes(item.file.size)}</p>
+                      {(item.status === 'uploading' || item.status === 'done') && (
+                        <div className="mt-1.5">
+                          <div className="w-full bg-gray-100 rounded-full h-1">
+                            <div
+                              className={`h-1 rounded-full transition-all ${item.status === 'done' ? 'bg-green-500' : 'bg-blue-500'}`}
+                              style={{ width: `${item.progress}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                      {item.status === 'error' && (
+                        <p className="text-xs text-red-500 mt-0.5">✗ {item.error}</p>
+                      )}
+                    </div>
+                    <div className="text-right min-w-16">
+                      {item.status === 'queued' && <span className="text-xs text-gray-400">Queued</span>}
+                      {item.status === 'uploading' && <span className="text-xs text-blue-500">{item.progress}%{item.speed ? ` · ${item.speed}` : ''}</span>}
+                      {item.status === 'done' && <span className="text-xs text-green-600 font-medium">✓ Done</span>}
+                      {item.status === 'error' && <span className="text-xs text-red-500">Failed</span>}
+                    </div>
                   </div>
-                  <div className="flex justify-between text-xs text-gray-400">
-                    <span>{progress}%</span>
-                    {speed && status === 'uploading' && <span>{speed}</span>}
-                  </div>
-                </div>
-              )}
-              {status === 'done' && <p className="text-xs text-green-600 font-medium mb-3">✓ Upload complete</p>}
-              {status === 'error' && <p className="text-xs text-red-500 mb-3">✗ {errorMsg}</p>}
-              <div className="flex gap-3">
-                <button
-                  onClick={startUpload}
-                  disabled={status === 'uploading' || status === 'done'}
-                  className="flex-1 py-2.5 bg-gray-900 text-white text-sm font-medium rounded-xl hover:bg-gray-700 disabled:opacity-40 transition-colors"
-                >
-                  {status === 'uploading' ? `Uploading… ${progress}%` : 'Upload'}
-                </button>
-                {status === 'done' && (
-                  <button onClick={reset} className="py-2.5 px-4 border border-gray-200 text-sm text-gray-600 rounded-xl hover:bg-gray-50">
-                    Upload another
-                  </button>
-                )}
+                ))}
               </div>
             </div>
           )}
